@@ -1,331 +1,48 @@
-import { before } from "@api/patcher";
-import { showToast } from "@api/ui/toasts";
-import { findByName, findByProps } from "@metro";
-import { MessageStore, UserStore } from "@metro/common/stores";
 import { definePlugin } from "@plugins";
 import { Contributors, Developers } from "@rain/Developers";
 
-import { addLogEntry, clearLogs, repairCorruptedLogs } from "./database";
+import { removeAllGhosts } from "./ghosts";
+import { patchActionSheet } from "./patches/actionsheet";
+import { patchCache } from "./patches/cache";
+import { patchDelete } from "./patches/delete";
+import { patchEdit } from "./patches/edit";
+import { patchLoad } from "./patches/load";
+import { patchRedirect } from "./patches/redirect";
+import { patchRender } from "./patches/render";
 import Settings from "./settings";
-import { useMessageLoggerSettings } from "./storage";
+import { clearState } from "./state";
+import { loadStore } from "./store";
 
 let patches: Array<() => void> = [];
-const selfDeletedMessages = new Set<string>();
-const deleteable: string[] = [];
-
-function logToDatabase(message: any, type: "DELETE" | "UPDATE") {
-    const logEntry = {
-        timestamp: new Date().toISOString(),
-        type,
-        messageId: message.id,
-        channelId: message.channelId,
-        author: {
-            id: message.author?.id,
-            username: message.author?.username,
-            discriminator: message.author?.discriminator,
-            bot: !!message.author?.bot
-        },
-        content: message.content,
-        attachments: message.attachments?.map((a: any) => a.url) || []
-    };
-    addLogEntry(logEntry);
-}
-
-function isBot(author: any): boolean {
-    if (!author) return false;
-    return !!(author.bot || author.discriminator === "0000" || author.system);
-}
-
-function shouldIgnoreMessage(message: any, storage: any): boolean {
-    try {
-        if (!message?.author?.id) return false;
-
-        if (storage.filters?.ignoreBots && isBot(message.author)) return true;
-
-        if (message?.__rainenhancements) return true;
-
-        return false;
-    } catch {
-        return false;
-    }
-}
-
-function formatTimestamp(use12Hour: boolean): string {
-    try {
-        const moment = findByProps("utc", "unix", "duration");
-        if (!moment) return "";
-        return moment().format(use12Hour ? "hh:mm:ss.SS a" : "HH:mm:ss.SS");
-    } catch {
-        return "";
-    }
-}
-
-function patchMessageDeleteHandler() {
-    try {
-        const FluxDispatcher = findByProps("dispatch", "_subscriptions");
-        const moment = findByProps("utc", "unix", "duration");
-        if (!FluxDispatcher || !moment) return () => {};
-
-        return before("dispatch", FluxDispatcher, (args: any[]) => {
-            try {
-                const event = args[0];
-                if (!event || event.type !== "MESSAGE_DELETE") return args;
-                if (event.otherPluginBypass) return args;
-
-                const storage = useMessageLoggerSettings.getState();
-                if (!storage.deleted?.enabled) return args;
-
-                if (!UserStore || !MessageStore) return args;
-
-                const currentUserId = UserStore.getCurrentUser?.()?.id;
-                const { id, channelId } = event;
-                const message = MessageStore.getMessage?.(channelId, id);
-
-                if (!message) return args;
-                if(storage.ignoreLists.user.split(" ").indexOf(message?.author?.id.toString()) !== -1) return args;
-                if(storage.ignoreLists.channel.split(" ").indexOf(message?.channel_id.toString()) !== -1) return args;
-
-                if (shouldIgnoreMessage(message, storage)) return args;
-
-                const wasSelfDeleted = selfDeletedMessages.has(id);
-                if (wasSelfDeleted) selfDeletedMessages.delete(id);
-
-                if (deleteable.includes(id)) {
-                    const idx = deleteable.indexOf(id);
-                    deleteable.splice(idx, 1);
-                    return args;
-                }
-
-                if (storage.databaseLogging) {
-                    logToDatabase(message, "DELETE");
-                }
-
-                deleteable.push(id);
-
-                let automodMessage = "This message was deleted";
-
-                if(storage.custom.customDeleteTextEnabled) automodMessage = storage.custom.customDeletedText;
-                if (storage.deleted?.showTimestamps) {
-                    automodMessage += ` (${formatTimestamp(storage.deleted.use12Hour)})`;
-                }
-
-                args[0] = {
-                    type: "MESSAGE_EDIT_FAILED_AUTOMOD",
-                    messageData: {
-                        type: 1,
-                        message: { channelId, messageId: id },
-                    },
-                    errorResponseBody: { code: 200000, message: automodMessage },
-                };
-
-                setTimeout(() => {
-                    try {
-                        FluxDispatcher.dispatch({
-                            type: "MESSAGE_UPDATE",
-                            otherPluginBypass: true,
-                            message: {
-                                ...message,
-                                flags: (message.flags || 0) | 8192,
-                                content: storage.deleted?.showOnlyTimestamp ? "" : message.content
-                            }
-                        });
-                    } catch (e) {
-                        console.error("[MessageLogger] Failed to dispatch MESSAGE_UPDATE:", e);
-                    }
-                }, 0);
-
-                return args;
-            } catch (e) {
-                console.error("[MessageLogger] Dispatch Patch Error:", e);
-            }
-            return args;
-        });
-    } catch (e) {
-        console.error("[MessageLogger] Failed to patch delete handler:", e);
-        return () => {};
-    }
-}
-
-function patchMessageEditHandler() {
-    try {
-        const FluxDispatcher = findByProps("dispatch", "_subscriptions");
-        const emojiRegex = /https:\/\/cdn\.discordapp\.com\/emojis\/\d+\.\w+/g;
-
-        if (!FluxDispatcher || !MessageStore) return () => {};
-
-        return before("dispatch", FluxDispatcher, (args: any[]) => {
-            try {
-                const event = args[0];
-                if (!event || event.type !== "MESSAGE_UPDATE" || !event.message) return args;
-                if (event.otherPluginBypass) return args;
-
-                let EDIT_HISTORY_SEPARATOR = "`[ EDITED ]`";
-                const storage = useMessageLoggerSettings.getState();
-                if(storage.custom.customEditTextEnabled) EDIT_HISTORY_SEPARATOR = storage.custom.customEditText;
-
-                if (!storage.edited?.enabled) return args;
-
-                const message = event.message;
-                if (!message?.content || !message?.id) return args;
-
-                if (storage.filters?.ignoreSelfEdits && message?.author?.id === UserStore.getCurrentUser().id) return args;
-
-                if(storage.ignoreLists.user.split(" ").indexOf(message?.author?.id.toString()) !== -1) return args;
-                if(storage.ignoreLists.channel.split(" ").indexOf(message?.channel_id.toString()) !== -1) return args;
-                const prevMessage = MessageStore.getMessage?.(message.channel_id || message.channelId, message.id);
-                if (!prevMessage || !prevMessage.content || prevMessage.content === message.content) return args;
-
-                if (prevMessage?.__rainenhancements || message?.__rainenhancements) return args;
-
-                const separator = storage.edited?.showSeparator !== false ? EDIT_HISTORY_SEPARATOR : "";
-                const oldContent = prevMessage.content.replace(emojiRegex, "").trim();
-                const newContent = oldContent + (separator ? `  ${separator}\n\n` : "\n") + message.content;
-
-                event.message = {
-                    ...message,
-                    content: newContent
-                };
-            } catch (e) {
-                console.error("[MessageLogger] MESSAGE_UPDATE Error:", e);
-            }
-            return args;
-        });
-    } catch (e) {
-        console.error("[MessageLogger] Failed to patch edit handler:", e);
-        return () => {};
-    }
-}
-
-function patchRowManager() {
-    try {
-        const RowManager = findByName("RowManager");
-        if (!RowManager) return () => {};
-
-        const EDIT_HISTORY_SEPARATOR = "`[ EDITED ]`";
-
-        return before("generate", RowManager.prototype, args => {
-            try {
-                const data = args[0];
-                if (!data?.message) return args;
-
-                const msg = data.message;
-                const storage = useMessageLoggerSettings.getState();
-
-                const isDeleted = msg.was_deleted || msg.deleted || (typeof msg.flags === "number" && (msg.flags & 8192)) || msg.type === 6 || deleteable.includes(msg.id);
-
-                if (isDeleted && storage.deleted?.enabled) {
-                    if (shouldIgnoreMessage(msg, storage)) return args;
-
-                    msg.style = {
-                        backgroundColor: "rgba(240, 71, 71, 0.1)",
-                        borderLeftWidth: 4,
-                        borderLeftColor: "#F04747"
-                    };
-                }
-
-                if (storage.edited?.enabled && typeof msg.content === "string" && msg.content.includes(EDIT_HISTORY_SEPARATOR)) {
-                    const separator = new RegExp(EDIT_HISTORY_SEPARATOR, "gmi");
-                    if (separator.test(msg.content) && data.buttons) {
-                        const React = require("react");
-                        const ActionSheet = findByName("ActionSheet");
-                        const FormRow = findByName("FormRow");
-                        const getAssetIDByName = findByProps("getAssetIDByName")?.getAssetIDByName;
-                        const FluxDispatcher = findByProps("dispatch", "_subscriptions");
-
-                        data.buttons.push(
-                            React.createElement(FormRow, {
-                                label: "Remove Edit History",
-                                leading: React.createElement("img", { style: { opacity: 1 }, src: getAssetIDByName ? getAssetIDByName("ic_edit_24px") : undefined }),
-                                onPress: () => {
-                                    try {
-                                        const Edited = EDIT_HISTORY_SEPARATOR + "\n\n";
-                                        const parts = msg.content.split(Edited);
-                                        const targetMessage = parts[parts.length - 1];
-
-                                        if (FluxDispatcher) {
-                                            FluxDispatcher.dispatch({
-                                                type: "MESSAGE_UPDATE",
-                                                otherPluginBypass: true,
-                                                message: {
-                                                    ...msg,
-                                                    content: targetMessage,
-                                                    embeds: msg.embeds ?? [],
-                                                    attachments: msg.attachments ?? [],
-                                                    mentions: msg.mentions ?? [],
-                                                    guild_id: msg.guild_id,
-                                                },
-                                            });
-                                        }
-
-                                        if (ActionSheet?.hideActionSheet) {
-                                            ActionSheet.hideActionSheet();
-                                        }
-
-                                        showToast("[MessageLogger] Edit history removed", getAssetIDByName ? getAssetIDByName("ic_edit_24px") : undefined);
-                                    } catch (e) {
-                                        console.error("[MessageLogger] Remove edit history error:", e);
-                                    }
-                                }
-                            })
-                        );
-                    }
-                }
-            } catch (e) {
-                console.error("[MessageLogger] RowManager Error:", e);
-            }
-            return args;
-        });
-    } catch (e) {
-        console.error("[MessageLogger] Failed to patch RowManager:", e);
-        return () => {};
-    }
-}
-
-function patchDeleteAction() {
-    try {
-        const MessageActions = findByProps("deleteMessage");
-        if (!MessageActions) return () => {};
-
-        return before("deleteMessage", MessageActions, args => {
-            try {
-                const [, messageId] = args;
-                if (messageId) selfDeletedMessages.add(messageId);
-            } catch (e) {
-                console.error("[MessageLogger] Delete action patch error:", e);
-            }
-            return args;
-        });
-    } catch (e) {
-        console.error("[MessageLogger] Failed to patch delete action:", e);
-        return () => {};
-    }
-}
 
 export default definePlugin({
     name: "MessageLogger",
-    description: "Prevents deleted messages from being lost by storing them in memory",
-    author: [Contributors.LampDelivery, Developers.kmmiio99o],
+    description: "Keeps deleted messages (red) and edit history (grayscale) visible, with optional persistence.",
+    author: [Contributors.LampDelivery, Developers.kmmiio99o, {name: "max2fly", id: 236950175480807424n}],
     id: "messagelogger",
-    version: "2.0.0",
+    version: "4.0.0",
     settings: Settings,
     start() {
-        clearLogs();
-        repairCorruptedLogs();
-        patches.push(patchDeleteAction());
-        patches.push(patchMessageDeleteHandler());
-        patches.push(patchMessageEditHandler());
-        patches.push(patchRowManager());
+        if (patches.length) return; // guard against double-apply
+        void loadStore();
+        patches.push(patchCache());
+        patches.push(patchLoad());
+        patches.push(patchRender());
+        patches.push(patchDelete());
+        patches.push(patchEdit());
+        patches.push(patchActionSheet());
+        patches.push(patchRedirect());
     },
     stop() {
         for (const unpatch of patches) {
             try {
                 unpatch();
-            } catch (e) {
-                console.error("[MessageLogger] Error unpatching:", e);
+            } catch {
+                /* ignore */
             }
         }
         patches = [];
-        selfDeletedMessages.clear();
-        deleteable.length = 0;
+        removeAllGhosts();
+        clearState();
     },
 });
