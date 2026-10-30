@@ -14,6 +14,13 @@ export const DELETED_MARKER_FLAG = 1 << 22;
 // Event type we swap a swallowed MESSAGE_DELETE to, so no store removes the message.
 export const NOOP_EVENT_TYPE = "MESSAGE_LOGGER_SWALLOW_NOOP";
 
+// Discord MessageType.REPLY. A reply row renders its reference header only when it's a group
+// head (renderContentOnly === false). We collapse all but the oldest ghost (and the live
+// message) of a reply stack to content-only continuation lines, so a single reply tag renders
+// at the top of the stack instead of one per row.
+export const MESSAGE_TYPE_REPLY = 19;
+export const MESSAGE_TYPE_DEFAULT = 0;
+
 // Ghost (edit-history) row ids are `parentId - (GHOST_ID_BASE - versionIndex)`, so each
 // edit version gets a STABLE unique id (its content never changes) — avoiding RowManager's
 // per-id row cache returning a stale version. Oldest version has the smallest id (renders

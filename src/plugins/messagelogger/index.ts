@@ -18,7 +18,7 @@ let patches: Array<() => void> = [];
 export default definePlugin({
     name: "MessageLogger",
     description: "Keeps deleted messages (red) and edit history (grayscale) visible, with optional persistence.",
-    author: [Contributors.LampDelivery, Developers.kmmiio99o, {name: "max2fly", id: 236950175480807424n}],
+    author: [Contributors.LampDelivery, Developers.kmmiio99o, { name: "max2fly", id: 236950175480807424n }],
     id: "messagelogger",
     version: "4.0.0",
     settings: Settings,

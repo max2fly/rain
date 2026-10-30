@@ -35,6 +35,14 @@ function bucket(channelId: string): ChannelBucket {
     return b;
 }
 
+// True once the async disk read has actually completed. Readers (CHANNEL_SELECT re-injection)
+// gate on this so they don't act on an empty store mid-load; the `loaded` flag above only
+// prevents a double-load and flips before the await.
+let ready = false;
+export function storeReady(): boolean {
+    return ready;
+}
+
 export async function loadStore(): Promise<void> {
     if (loaded) return;
     loaded = true;
@@ -45,6 +53,7 @@ export async function loadStore(): Promise<void> {
     } catch {
         data = emptyStore();
     }
+    ready = true;
 }
 
 // Begin reading persisted history at module-import time (earliest possible) so it's ready

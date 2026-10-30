@@ -17,7 +17,7 @@ let rebuildNonce = 0;
 // A flag-bit toggle on the parent forces the store to commit a NEW collection — which is
 // cloned from the (ghost-containing) _array — so the list re-runs createRows. (Same trick
 // the delete path uses.)
-function forceRerender(parentRecord: any): void {
+export function forceRerender(parentRecord: any): void {
     try {
         if (!parentRecord || !FluxDispatcher) return;
         FluxDispatcher.dispatch({
@@ -39,7 +39,8 @@ function makeGhostRecord(parentRecord: any, oldContent: string, offset: number):
     let g = parentRecord.set("id", ghostId).set("content", oldContent).set("editedTimestamp", null)
         .set("flags", ((parentRecord.flags || 0) & 0xFFFFFF) | ((rebuildNonce & 0x7F) << 24));
     try {
-        g = g.set("embeds", []).set("attachments", []).set("components", []);
+        // reactions stripped: they belong only on the live message, not its edit-history ghosts.
+        g = g.set("embeds", []).set("attachments", []).set("components", []).set("reactions", []);
     } catch {
         /* some fields may be immutable-typed; ignore */
     }

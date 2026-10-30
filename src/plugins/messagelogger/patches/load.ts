@@ -1,10 +1,11 @@
 import { before } from "@api/patcher";
 import { findByProps } from "@metro";
+import { MessageStore } from "@metro/common/stores";
 
 import { GHOST_ID_BASE } from "../constants";
-import { makeGhostRaw } from "../ghosts";
+import { forceRerender, makeGhostRaw, rebuildGhosts } from "../ghosts";
 import { channelsWithGhosts, deletedIds } from "../state";
-import { getChannelHistory } from "../store";
+import { getChannelHistory, storeReady } from "../store";
 
 const FluxDispatcher = findByProps("dispatch", "_subscriptions");
 
@@ -13,6 +14,33 @@ function toBig(id: any): bigint | null {
         return BigInt(String(id));
     } catch {
         return null;
+    }
+}
+
+// Re-inject stored history for a channel directly into its already-built MessageStore
+// collection (used on CHANNEL_SELECT, when Discord serves a cached channel and no
+// LOAD_MESSAGES_SUCCESS fires). Edits rebuild their gray ghosts (rebuildGhosts no-ops when the
+// parent isn't present); deleted messages that are still present in the cached collection (we
+// swallow deletes, so Discord keeps the record) get re-marked + re-rendered so they show red
+// again. Deleted messages no longer in the collection are left to the covering LOAD, same as
+// the LOAD path's older-than-page handling.
+function reinjectChannel(channelId: string): void {
+    try {
+        const coll: any = MessageStore.getMessages?.(channelId);
+        if (!coll?._map) return;
+        const hist = getChannelHistory(channelId);
+        for (const e of hist.edited) {
+            if (coll._map[e.currentMessageId]) rebuildGhosts(channelId, e.currentMessageId);
+        }
+        for (const d of hist.deleted) {
+            const idStr = String(d.raw?.id ?? "");
+            if (idStr && coll._map[idStr] && !deletedIds.has(idStr)) {
+                deletedIds.add(idStr);
+                forceRerender(coll._map[idStr]);
+            }
+        }
+    } catch {
+        /* ignore */
     }
 }
 
@@ -25,7 +53,16 @@ export function patchLoad(): () => void {
     return before("dispatch", FluxDispatcher, (args: any[]) => {
         try {
             const ev = args[0];
-            if (ev?.type !== "LOAD_MESSAGES_SUCCESS" || ev.rainBypass) return args;
+            if (ev?.rainBypass) return args;
+
+            // Cached channels don't dispatch LOAD_MESSAGES_SUCCESS, so re-inject on CHANNEL_SELECT
+            // too (the only reliable "channel is now showing" signal for a cached open).
+            if (ev?.type === "CHANNEL_SELECT" && ev.channelId) {
+                if (storeReady()) reinjectChannel(ev.channelId);
+                return args;
+            }
+
+            if (ev?.type !== "LOAD_MESSAGES_SUCCESS") return args;
             const channelId = ev.channelId;
             const msgs = ev.messages;
             if (!Array.isArray(msgs) || !msgs.length || !channelId) return args;
